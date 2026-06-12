@@ -13,11 +13,8 @@ app.use(express.json());
 app.post('/process', upload.single('file'), async (req, res) => {
   try {
     const userRequest = req.body.request || 'Проанализируй данные';
-const originalFilename = req.body.filename || req.file.originalname || 'result.xlsx';
-const filePath = req.file.path;
-const filePath = req.file.path;
+    const originalFilename = req.body.filename || req.file.originalname || 'result.xlsx';
     const filePath = req.file.path;
-
     // Читаем Excel
     const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
