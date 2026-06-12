@@ -13,8 +13,9 @@ app.use(express.json());
 app.post('/process', upload.single('file'), async (req, res) => {
   try {
     const userRequest = req.body.request || 'Проанализируй данные';
-    const originalFilename = req.body.filename || req.file.originalname || 'result.xlsx';
+    const originalFilename = req.body.filename || 'result.xlsx';
     const filePath = req.file.path;
+
     // Читаем Excel
     const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
@@ -30,7 +31,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
         messages: [
           {
             role: 'user',
-            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(data, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВыполни запрос и верни ТОЛЬКО JSON массив строк без каких-либо пояснений, markdown или текста. Только валидный JSON массив который начинается с [ и заканчивается ].`
+            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(data, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВАЖНО: Верни ТОЛЬКО валидный JSON массив. Никакого текста до или после. Никаких markdown блоков. Только [ ... ]. Все объекты должны иметь те же ключи что и входные данные. Если нужно добавить итоговую строку — добавь объект с теми же ключами, где ненужные поля оставь null.`
           }
         ]
       },
@@ -45,14 +46,18 @@ app.post('/process', upload.single('file'), async (req, res) => {
 
     // Парсим ответ Claude
     const claudeText = claudeResponse.data.content[0].text;
-    const clean = claudeText.replace(/```json|```/g, '').trim();
+    
     let resultData;
-try {
-  resultData = JSON.parse(clean);
-} catch(e) {
-  // Если Claude не вернул JSON - возвращаем данные с комментарием
-  resultData = data.map((row, i) => ({ ...row, '_Комментарий': i === 0 ? clean : '' }));
-}
+    try {
+      const clean = claudeText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const start = clean.indexOf('[');
+      const end = clean.lastIndexOf(']');
+      const jsonStr = clean.substring(start, end + 1);
+      resultData = JSON.parse(jsonStr);
+    } catch(e) {
+      resultData = data;
+      resultData.push({ '_Ошибка': 'Claude не смог обработать: ' + e.message });
+    }
 
     // Создаём новый Excel
     const newWorkbook = XLSX.utils.book_new();
@@ -63,9 +68,8 @@ try {
     XLSX.writeFile(newWorkbook, outputPath);
 
     // Отправляем файл
-    const originalName = req.file.originalname || 'result.xlsx';
-const resultName = 'result_' + originalFilename;
-res.download(outputPath, resultName, () => {
+    const resultName = 'result_' + originalFilename;
+    res.download(outputPath, resultName, () => {
       fs.unlinkSync(filePath);
       fs.unlinkSync(outputPath);
     });
