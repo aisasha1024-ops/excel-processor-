@@ -249,7 +249,15 @@ app.post('/process', upload.single('file'), async (req, res) => {
     const outputPath = path.join('uploads', `result_${Date.now()}.xlsx`);
     await workbook.xlsx.writeFile(outputPath);
 
-    const resultName = 'result_' + originalFilename;
+    const now = new Date();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const yyyy = now.getFullYear();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const min = String(now.getMinutes()).padStart(2, '0');
+    const dateSuffix = `_${hh}-${min}_${dd}-${mm}-${yyyy}`;
+    const baseName = originalFilename.replace(/.xlsx$/i, '');
+    const resultName = baseName + dateSuffix + '.xlsx';
     res.download(outputPath, resultName, () => {
       fs.unlinkSync(filePath);
       fs.unlinkSync(outputPath);
