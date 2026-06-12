@@ -26,15 +26,6 @@ function isRowRed(row, maxCol) {
   return false;
 }
 
-// Копируем стиль ячейки
-function copyCellStyle(src, dst) {
-  if (src.font) dst.font = JSON.parse(JSON.stringify(src.font));
-  if (src.fill) dst.fill = JSON.parse(JSON.stringify(src.fill));
-  if (src.border) dst.border = JSON.parse(JSON.stringify(src.border));
-  if (src.alignment) dst.alignment = JSON.parse(JSON.stringify(src.alignment));
-  if (src.numFmt) dst.numFmt = src.numFmt;
-}
-
 app.post('/process', upload.single('file'), async (req, res) => {
   try {
     const userRequest = req.body.request || 'Проанализируй данные';
@@ -45,7 +36,6 @@ app.post('/process', upload.single('file'), async (req, res) => {
     await workbook.xlsx.readFile(filePath);
     const worksheet = workbook.worksheets[0];
 
-    // Собираем заголовки
     const headerRow = worksheet.getRow(1);
     const headers = [];
     headerRow.eachCell({ includeEmpty: true }, (cell, colNum) => {
@@ -53,7 +43,6 @@ app.post('/process', upload.single('file'), async (req, res) => {
     });
     const maxCol = headers.length - 1;
 
-    // Считаем цвета и собираем данные
     let redCount = 0;
     let blackCount = 0;
     const cleanData = [];
@@ -62,9 +51,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
       if (rowNum === 1) return;
       const firstCell = row.getCell(1);
       if (!firstCell || firstCell.value === null || firstCell.value === undefined) return;
-
       if (isRowRed(row, maxCol)) redCount++; else blackCount++;
-
       const rowData = {};
       for (let c = 1; c <= maxCol; c++) {
         let val = row.getCell(c).value;
@@ -80,57 +67,69 @@ app.post('/process', upload.single('file'), async (req, res) => {
                         requestLower.includes('цвет') || requestLower.includes('шрифт') ||
                         requestLower.includes('запретн') || requestLower.includes('аварийн');
 
-    // Спрашиваем Claude: что добавить и куда вставить
-    const claudeResponse = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2048,
-        messages: [{
-          role: 'user',
-          content: `Файл Excel содержит ${cleanData.length} строк данных (не считая заголовок).
+    let instruction;
+
+    if (isColorTask) {
+      // Для задач про цвета — строим инструкцию сами, без Claude
+      instruction = {
+        insertPosition: 'end',
+        emptyRowsBefore: 3,
+        rows: [
+          { values: ['Запретные ТС', redCount], fontColor: 'FF0000', bold: true },
+          { values: ['Аварийные ТС', blackCount], fontColor: '0000FF', bold: true }
+        ]
+      };
+    } else {
+      // Для других задач — спрашиваем Claude
+      const claudeResponse = await axios.post(
+        'https://api.anthropic.com/v1/messages',
+        {
+          model: 'claude-sonnet-4-6',
+          max_tokens: 2048,
+          messages: [{
+            role: 'user',
+            content: `Файл Excel содержит ${cleanData.length} строк данных (не считая заголовок).
 Заголовки: ${JSON.stringify(headers.slice(1))}
-${isColorTask ? `Строк с красным шрифтом: ${redCount}. Строк с чёрным шрифтом: ${blackCount}.` : `Данные: ${JSON.stringify(cleanData, null, 2)}`}
+Данные: ${JSON.stringify(cleanData, null, 2)}
 
 Запрос пользователя: "${userRequest}"
 
-Верни ТОЛЬКО JSON объект такого формата (никакого текста вокруг):
+Верни ТОЛЬКО JSON объект (никакого текста вокруг):
 {
   "insertPosition": "end",
   "emptyRowsBefore": 0,
   "rows": [
-    { "values": ["текст col1", "значение col2", null, ...], "fontColor": "FF0000", "bold": true }
+    { "values": ["текст col1", "значение col2", null], "fontColor": "FF0000", "bold": true }
   ]
 }
 
 Правила:
-- insertPosition: "start" (после заголовка), "end" (в конец), или число (номер строки данных после которой вставить, 1 = после первой строки данных)
-- emptyRowsBefore: количество пустых строк перед вставкой (0-5)
-- rows: массив строк для вставки
-- values: массив значений для каждой колонки (по порядку заголовков), null для пустых
-- fontColor: цвет шрифта в формате RRGGBB (без FF впереди), например "FF0000" для красного, "0000FF" для синего, "000000" для чёрного
+- insertPosition: "start" (сразу после заголовка), "end" (в самый конец), или число N (после N-й строки данных)
+- emptyRowsBefore: пустых строк перед вставкой (0-5)
+- rows: строки для вставки, values по порядку заголовков
+- fontColor: RRGGBB без альфа — "FF0000" красный, "0000FF" синий, "000000" чёрный
 - bold: true или false`
-        }]
-      },
-      {
-        headers: {
-          'x-api-key': process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json'
+          }]
+        },
+        {
+          headers: {
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'Content-Type': 'application/json'
+          }
         }
-      }
-    );
+      );
 
-    const claudeText = claudeResponse.data.content[0].text;
-    let instruction;
-    try {
-      const clean = claudeText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      instruction = JSON.parse(clean.substring(clean.indexOf('{'), clean.lastIndexOf('}') + 1));
-    } catch(e) {
-      instruction = { insertPosition: 'end', emptyRowsBefore: 0, rows: [] };
+      const claudeText = claudeResponse.data.content[0].text;
+      try {
+        const clean = claudeText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        instruction = JSON.parse(clean.substring(clean.indexOf('{'), clean.lastIndexOf('}') + 1));
+      } catch(e) {
+        instruction = { insertPosition: 'end', emptyRowsBefore: 0, rows: [] };
+      }
     }
 
-    // Читаем все строки оригинала в память (с форматированием)
+    // Читаем все строки в память
     const originalRows = [];
     worksheet.eachRow({ includeEmpty: false }, (row, rowNum) => {
       const cells = [];
@@ -145,84 +144,94 @@ ${isColorTask ? `Строк с красным шрифтом: ${redCount}. Ст�
           numFmt: cell.numFmt || null,
         });
       }
-      originalRows.push({ rowNum, cells });
+      originalRows.push(cells);
     });
 
-    // Строим новые строки для вставки
-    const newRows = [];
-    for (let i = 0; i < (instruction.emptyRowsBefore || 0); i++) {
-      newRows.push({ isEmpty: true });
-    }
-    for (const r of (instruction.rows || [])) {
-      newRows.push({
-        isEmpty: false,
-        values: r.values || [],
-        fontColor: r.fontColor || '000000',
-        bold: r.bold || false
-      });
-    }
+    const emptyBefore = instruction.emptyRowsBefore || 0;
+    const newRows = instruction.rows || [];
 
-    // Определяем позицию вставки (индекс в originalRows после заголовка)
-    let insertAfterIndex; // индекс в originalRows
+    let insertAfterIndex;
     const pos = instruction.insertPosition;
     if (pos === 'start') {
-      insertAfterIndex = 0; // после заголовка (индекс 0)
+      insertAfterIndex = 1;
     } else if (pos === 'end' || pos === undefined) {
-      insertAfterIndex = originalRows.length; // в самый конец
+      insertAfterIndex = originalRows.length;
     } else {
-      // число = после N-й строки данных (1-based), заголовок = индекс 0
       insertAfterIndex = Math.min(parseInt(pos) + 1, originalRows.length);
     }
 
-    // Пересобираем worksheet
-    // Сначала очищаем все строки
-    const totalNewRows = originalRows.length + newRows.length;
-    for (let i = 1; i <= totalNewRows + 5; i++) {
+    // Очищаем worksheet
+    const maxPossibleRow = originalRows.length + emptyBefore + newRows.length + 5;
+    for (let i = 1; i <= maxPossibleRow; i++) {
       const row = worksheet.getRow(i);
-      for (let c = 1; c <= maxCol; c++) row.getCell(c).value = null;
+      for (let c = 1; c <= maxCol; c++) {
+        const cell = row.getCell(c);
+        cell.value = null;
+        cell.font = null;
+        cell.fill = null;
+        cell.border = null;
+        cell.alignment = null;
+        cell.numFmt = null;
+      }
     }
 
-    // Записываем оригинальные строки + вставляем новые
     let writeIndex = 1;
+
     for (let i = 0; i < originalRows.length; i++) {
-      // Если это позиция вставки — вставляем новые строки
       if (i === insertAfterIndex) {
+        // Пустые строки
+        for (let e = 0; e < emptyBefore; e++) {
+          const emptyRow = worksheet.getRow(writeIndex++);
+          for (let c = 1; c <= maxCol; c++) {
+            emptyRow.getCell(c).value = null;
+            emptyRow.getCell(c).font = null;
+          }
+        }
+        // Новые строки
         for (const nr of newRows) {
           const row = worksheet.getRow(writeIndex++);
-          if (!nr.isEmpty) {
-            for (let c = 0; c < Math.min(nr.values.length, maxCol); c++) {
-              const cell = row.getCell(c + 1);
-              cell.value = nr.values[c] !== undefined ? nr.values[c] : null;
-              cell.font = { bold: nr.bold, color: { argb: 'FF' + nr.fontColor }, size: 12 };
-            }
+          const vals = nr.values || [];
+          const argb = 'FF' + nr.fontColor.toUpperCase();
+          for (let c = 0; c < Math.min(vals.length, maxCol); c++) {
+            const cell = row.getCell(c + 1);
+            cell.value = vals[c] !== undefined ? vals[c] : null;
+            cell.font = { bold: nr.bold || false, color: { argb }, size: 12 };
           }
         }
       }
-      // Пишем оригинальную строку
-      const origRow = originalRows[i];
+
+      // Оригинальная строка
+      const origCells = originalRows[i];
       const row = worksheet.getRow(writeIndex++);
-      for (let c = 0; c < origRow.cells.length; c++) {
-        const srcCell = origRow.cells[c];
-        const dstCell = row.getCell(c + 1);
-        dstCell.value = srcCell.value;
-        if (srcCell.font) dstCell.font = srcCell.font;
-        if (srcCell.fill) dstCell.fill = srcCell.fill;
-        if (srcCell.border) dstCell.border = srcCell.border;
-        if (srcCell.alignment) dstCell.alignment = srcCell.alignment;
-        if (srcCell.numFmt) dstCell.numFmt = srcCell.numFmt;
+      for (let c = 0; c < origCells.length; c++) {
+        const src = origCells[c];
+        const dst = row.getCell(c + 1);
+        dst.value = src.value;
+        if (src.font) dst.font = src.font;
+        if (src.fill) dst.fill = src.fill;
+        if (src.border) dst.border = src.border;
+        if (src.alignment) dst.alignment = src.alignment;
+        if (src.numFmt) dst.numFmt = src.numFmt;
       }
     }
 
     // Если вставка в конец
     if (insertAfterIndex >= originalRows.length) {
+      for (let e = 0; e < emptyBefore; e++) {
+        const emptyRow = worksheet.getRow(writeIndex++);
+        for (let c = 1; c <= maxCol; c++) {
+          emptyRow.getCell(c).value = null;
+          emptyRow.getCell(c).font = null;
+        }
+      }
       for (const nr of newRows) {
         const row = worksheet.getRow(writeIndex++);
-        if (!nr.isEmpty) {
-          for (let c = 0; c < Math.min(nr.values.length, maxCol); c++) {
-            const cell = row.getCell(c + 1);
-            cell.value = nr.values[c] !== undefined ? nr.values[c] : null;
-            cell.font = { bold: nr.bold, color: { argb: 'FF' + nr.fontColor }, size: 12 };
-          }
+        const vals = nr.values || [];
+        const argb = 'FF' + nr.fontColor.toUpperCase();
+        for (let c = 0; c < Math.min(vals.length, maxCol); c++) {
+          const cell = row.getCell(c + 1);
+          cell.value = vals[c] !== undefined ? vals[c] : null;
+          cell.font = { bold: nr.bold || false, color: { argb }, size: 12 };
         }
       }
     }
