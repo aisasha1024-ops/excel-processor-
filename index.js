@@ -31,7 +31,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
         messages: [
           {
             role: 'user',
-            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(data, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВАЖНО: Верни ТОЛЬКО валидный JSON массив. Никакого текста до или после. Никаких markdown блоков. Только [ ... ]. Все объекты должны иметь те же ключи что и входные данные. Если нужно добавить итоговую строку — добавь объект с теми же ключами, где ненужные поля оставь null.`
+            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(data, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВерни ТОЛЬКО один JSON объект (не массив!) для добавления итоговой строки. Объект должен содержать только нужные ключи из данных, остальные оставь без упоминания. Никакого текста, только { ... }.`
           }
         ]
       },
@@ -46,22 +46,23 @@ app.post('/process', upload.single('file'), async (req, res) => {
 
     // Парсим ответ Claude
     const claudeText = claudeResponse.data.content[0].text;
-    
-    let resultData;
+
+    let summaryRow;
     try {
       const clean = claudeText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const start = clean.indexOf('[');
-      const end = clean.lastIndexOf(']');
-      const jsonStr = clean.substring(start, end + 1);
-      resultData = JSON.parse(jsonStr);
+      const start = clean.indexOf('{');
+      const end = clean.lastIndexOf('}');
+      summaryRow = JSON.parse(clean.substring(start, end + 1));
     } catch(e) {
-      resultData = data;
-      resultData.push({ '_Ошибка': 'Claude не смог обработать: ' + e.message });
+      summaryRow = { '№ п/п': 'ИТОГО', '_Комментарий': claudeText.substring(0, 200) };
     }
+
+    // Добавляем итоговую строку к исходным данным
+    data.push(summaryRow);
 
     // Создаём новый Excel
     const newWorkbook = XLSX.utils.book_new();
-    const newSheet = XLSX.utils.json_to_sheet(resultData);
+    const newSheet = XLSX.utils.json_to_sheet(data);
     XLSX.utils.book_append_sheet(newWorkbook, newSheet, 'Result');
 
     const outputPath = path.join('uploads', `result_${Date.now()}.xlsx`);
