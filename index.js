@@ -57,7 +57,9 @@ app.post('/process', upload.single('file'), async (req, res) => {
     XLSX.writeFile(newWorkbook, outputPath);
 
     // Отправляем файл
-    res.download(outputPath, 'result.xlsx', () => {
+    const originalName = req.file.originalname || 'result.xlsx';
+const resultName = 'result_' + originalName;
+res.download(outputPath, resultName, () => {
       fs.unlinkSync(filePath);
       fs.unlinkSync(outputPath);
     });
