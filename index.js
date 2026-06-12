@@ -195,7 +195,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
           for (let c = 0; c < Math.min(vals.length, maxCol); c++) {
             const cell = row.getCell(c + 1);
             cell.value = vals[c] !== undefined ? vals[c] : null;
-            cell.font = { bold: nr.bold || false, color: { argb }, size: 12 };
+            cell.style = { font: { bold: nr.bold || false, color: { argb: argb }, size: 12 } };
           }
         }
       }
@@ -231,7 +231,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
         for (let c = 0; c < Math.min(vals.length, maxCol); c++) {
           const cell = row.getCell(c + 1);
           cell.value = vals[c] !== undefined ? vals[c] : null;
-          cell.font = { bold: nr.bold || false, color: { argb }, size: 12 };
+          cell.style = { font: { bold: nr.bold || false, color: { argb: argb }, size: 12 } };
         }
       }
     }
