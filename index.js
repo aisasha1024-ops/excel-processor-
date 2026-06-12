@@ -30,7 +30,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
         messages: [
           {
             role: 'user',
-            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(data, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВыполни запрос и верни результат в формате JSON массива для записи в Excel. Верни ТОЛЬКО JSON без пояснений.`
+            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(data, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВыполни запрос и верни ТОЛЬКО JSON массив строк без каких-либо пояснений, markdown или текста. Только валидный JSON массив который начинается с [ и заканчивается ].`
           }
         ]
       },
