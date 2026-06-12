@@ -13,6 +13,9 @@ app.use(express.json());
 app.post('/process', upload.single('file'), async (req, res) => {
   try {
     const userRequest = req.body.request || 'Проанализируй данные';
+const originalFilename = req.body.filename || req.file.originalname || 'result.xlsx';
+const filePath = req.file.path;
+const filePath = req.file.path;
     const filePath = req.file.path;
 
     // Читаем Excel
@@ -64,7 +67,7 @@ try {
 
     // Отправляем файл
     const originalName = req.file.originalname || 'result.xlsx';
-const resultName = 'result_' + originalName;
+const resultName = 'result_' + originalFilename;
 res.download(outputPath, resultName, () => {
       fs.unlinkSync(filePath);
       fs.unlinkSync(outputPath);
