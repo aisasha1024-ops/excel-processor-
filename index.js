@@ -46,7 +46,13 @@ app.post('/process', upload.single('file'), async (req, res) => {
     // Парсим ответ Claude
     const claudeText = claudeResponse.data.content[0].text;
     const clean = claudeText.replace(/```json|```/g, '').trim();
-    const resultData = JSON.parse(clean);
+    let resultData;
+try {
+  resultData = JSON.parse(clean);
+} catch(e) {
+  // Если Claude не вернул JSON - возвращаем данные с комментарием
+  resultData = data.map((row, i) => ({ ...row, '_Комментарий': i === 0 ? clean : '' }));
+}
 
     // Создаём новый Excel
     const newWorkbook = XLSX.utils.book_new();
