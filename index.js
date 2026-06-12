@@ -9,14 +9,12 @@ const app = express();
 const upload = multer({ dest: 'uploads/' });
 app.use(express.json());
 
-// Проверяем красный ли шрифт в строке
-function isRowRed(row) {
-  for (const cell of row) {
+function isRowRed(row, maxCol) {
+  for (let c = 1; c <= maxCol; c++) {
+    const cell = row.getCell(c);
     if (!cell || !cell.font || !cell.font.color) continue;
     const color = cell.font.color;
-    // indexed color: FFFF0000
     if (color.index && String(color.index).toUpperCase().includes('FF0000')) return true;
-    // argb color
     if (color.argb) {
       const rgb = color.argb.slice(2).toUpperCase();
       const r = parseInt(rgb.slice(0,2), 16);
@@ -28,13 +26,21 @@ function isRowRed(row) {
   return false;
 }
 
+// Копируем стиль ячейки
+function copyCellStyle(src, dst) {
+  if (src.font) dst.font = JSON.parse(JSON.stringify(src.font));
+  if (src.fill) dst.fill = JSON.parse(JSON.stringify(src.fill));
+  if (src.border) dst.border = JSON.parse(JSON.stringify(src.border));
+  if (src.alignment) dst.alignment = JSON.parse(JSON.stringify(src.alignment));
+  if (src.numFmt) dst.numFmt = src.numFmt;
+}
+
 app.post('/process', upload.single('file'), async (req, res) => {
   try {
     const userRequest = req.body.request || 'Проанализируй данные';
     const originalFilename = req.body.filename || 'result.xlsx';
     const filePath = req.file.path;
 
-    // Читаем файл через ExcelJS (сохраняет цвета)
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(filePath);
     const worksheet = workbook.worksheets[0];
@@ -47,34 +53,26 @@ app.post('/process', upload.single('file'), async (req, res) => {
     });
     const maxCol = headers.length - 1;
 
-    // Собираем данные и считаем цвета
-    const data = [];
+    // Считаем цвета и собираем данные
     let redCount = 0;
     let blackCount = 0;
+    const cleanData = [];
 
     worksheet.eachRow((row, rowNum) => {
       if (rowNum === 1) return;
-      const cells = [];
-      row.eachCell({ includeEmpty: true }, (cell) => cells.push(cell));
-      if (!cells[0] || cells[0].value === null) return;
+      const firstCell = row.getCell(1);
+      if (!firstCell || firstCell.value === null || firstCell.value === undefined) return;
+
+      if (isRowRed(row, maxCol)) redCount++; else blackCount++;
 
       const rowData = {};
       for (let c = 1; c <= maxCol; c++) {
-        const cell = row.getCell(c);
-        let val = cell.value;
+        let val = row.getCell(c).value;
         if (val && typeof val === 'object' && val.text) val = val.text;
         if (val && typeof val === 'object' && val.result !== undefined) val = val.result;
         rowData[headers[c]] = val;
       }
-
-      if (isRowRed(cells)) {
-        redCount++;
-        rowData['__color'] = 'red';
-      } else {
-        blackCount++;
-        rowData['__color'] = 'black';
-      }
-      data.push(rowData);
+      cleanData.push(rowData);
     });
 
     const requestLower = userRequest.toLowerCase();
@@ -82,87 +80,165 @@ app.post('/process', upload.single('file'), async (req, res) => {
                         requestLower.includes('цвет') || requestLower.includes('шрифт') ||
                         requestLower.includes('запретн') || requestLower.includes('аварийн');
 
-    // Создаём результирующий файл через ExcelJS (чтобы сохранить форматирование)
-    const resultWorkbook = new ExcelJS.Workbook();
-    const resultSheet = resultWorkbook.addWorksheet('Result');
+    // Спрашиваем Claude: что добавить и куда вставить
+    const claudeResponse = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        messages: [{
+          role: 'user',
+          content: `Файл Excel содержит ${cleanData.length} строк данных (не считая заголовок).
+Заголовки: ${JSON.stringify(headers.slice(1))}
+${isColorTask ? `Строк с красным шрифтом: ${redCount}. Строк с чёрным шрифтом: ${blackCount}.` : `Данные: ${JSON.stringify(cleanData, null, 2)}`}
 
-    // Добавляем заголовки
-    const cleanHeaders = [];
-    for (let c = 1; c <= maxCol; c++) {
-      if (headers[c] !== '__color') cleanHeaders.push(headers[c]);
+Запрос пользователя: "${userRequest}"
+
+Верни ТОЛЬКО JSON объект такого формата (никакого текста вокруг):
+{
+  "insertPosition": "end",
+  "emptyRowsBefore": 0,
+  "rows": [
+    { "values": ["текст col1", "значение col2", null, ...], "fontColor": "FF0000", "bold": true }
+  ]
+}
+
+Правила:
+- insertPosition: "start" (после заголовка), "end" (в конец), или число (номер строки данных после которой вставить, 1 = после первой строки данных)
+- emptyRowsBefore: количество пустых строк перед вставкой (0-5)
+- rows: массив строк для вставки
+- values: массив значений для каждой колонки (по порядку заголовков), null для пустых
+- fontColor: цвет шрифта в формате RRGGBB (без FF впереди), например "FF0000" для красного, "0000FF" для синего, "000000" для чёрного
+- bold: true или false`
+        }]
+      },
+      {
+        headers: {
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const claudeText = claudeResponse.data.content[0].text;
+    let instruction;
+    try {
+      const clean = claudeText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      instruction = JSON.parse(clean.substring(clean.indexOf('{'), clean.lastIndexOf('}') + 1));
+    } catch(e) {
+      instruction = { insertPosition: 'end', emptyRowsBefore: 0, rows: [] };
     }
-    resultSheet.addRow(cleanHeaders);
 
-    // Добавляем данные
-    for (const row of data) {
-      const rowArr = cleanHeaders.map(h => row[h] ?? null);
-      resultSheet.addRow(rowArr);
+    // Читаем все строки оригинала в память (с форматированием)
+    const originalRows = [];
+    worksheet.eachRow({ includeEmpty: false }, (row, rowNum) => {
+      const cells = [];
+      for (let c = 1; c <= maxCol; c++) {
+        const cell = row.getCell(c);
+        cells.push({
+          value: cell.value,
+          font: cell.font ? JSON.parse(JSON.stringify(cell.font)) : null,
+          fill: cell.fill ? JSON.parse(JSON.stringify(cell.fill)) : null,
+          border: cell.border ? JSON.parse(JSON.stringify(cell.border)) : null,
+          alignment: cell.alignment ? JSON.parse(JSON.stringify(cell.alignment)) : null,
+          numFmt: cell.numFmt || null,
+        });
+      }
+      originalRows.push({ rowNum, cells });
+    });
+
+    // Строим новые строки для вставки
+    const newRows = [];
+    for (let i = 0; i < (instruction.emptyRowsBefore || 0); i++) {
+      newRows.push({ isEmpty: true });
+    }
+    for (const r of (instruction.rows || [])) {
+      newRows.push({
+        isEmpty: false,
+        values: r.values || [],
+        fontColor: r.fontColor || '000000',
+        bold: r.bold || false
+      });
     }
 
-    if (isColorTask) {
-      // Отступ 3 строки
-      resultSheet.addRow([]);
-      resultSheet.addRow([]);
-      resultSheet.addRow([]);
-
-      // Строка "Запретные ТС" — красный жирный
-      const redRow = resultSheet.addRow([`Запретные ТС`, redCount]);
-      redRow.eachCell((cell) => {
-        cell.font = { bold: true, color: { argb: 'FFFF0000' }, size: 12 };
-      });
-
-      // Строка "Аварийные ТС" — синий жирный
-      const blackRow = resultSheet.addRow([`Аварийные ТС`, blackCount]);
-      blackRow.eachCell((cell) => {
-        cell.font = { bold: true, color: { argb: 'FF0000FF' }, size: 12 };
-      });
-
+    // Определяем позицию вставки (индекс в originalRows после заголовка)
+    let insertAfterIndex; // индекс в originalRows
+    const pos = instruction.insertPosition;
+    if (pos === 'start') {
+      insertAfterIndex = 0; // после заголовка (индекс 0)
+    } else if (pos === 'end' || pos === undefined) {
+      insertAfterIndex = originalRows.length; // в самый конец
     } else {
-      // Другие задачи — отправляем в Claude
-      const cleanData = data.map(({ __color, ...rest }) => rest);
-      const claudeResponse = await axios.post(
-        'https://api.anthropic.com/v1/messages',
-        {
-          model: 'claude-sonnet-4-6',
-          max_tokens: 4096,
-          messages: [{
-            role: 'user',
-            content: `Вот данные из Excel файла в формате JSON:\n${JSON.stringify(cleanData, null, 2)}\n\nЗапрос пользователя: ${userRequest}\n\nВерни ТОЛЬКО один JSON объект (не массив!) для добавления итоговой строки. Объект должен содержать только нужные ключи из данных. Никакого текста, только { ... }.`
-          }]
-        },
-        {
-          headers: {
-            'x-api-key': process.env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'Content-Type': 'application/json'
+      // число = после N-й строки данных (1-based), заголовок = индекс 0
+      insertAfterIndex = Math.min(parseInt(pos) + 1, originalRows.length);
+    }
+
+    // Пересобираем worksheet
+    // Сначала очищаем все строки
+    const totalNewRows = originalRows.length + newRows.length;
+    for (let i = 1; i <= totalNewRows + 5; i++) {
+      const row = worksheet.getRow(i);
+      for (let c = 1; c <= maxCol; c++) row.getCell(c).value = null;
+    }
+
+    // Записываем оригинальные строки + вставляем новые
+    let writeIndex = 1;
+    for (let i = 0; i < originalRows.length; i++) {
+      // Если это позиция вставки — вставляем новые строки
+      if (i === insertAfterIndex) {
+        for (const nr of newRows) {
+          const row = worksheet.getRow(writeIndex++);
+          if (!nr.isEmpty) {
+            for (let c = 0; c < Math.min(nr.values.length, maxCol); c++) {
+              const cell = row.getCell(c + 1);
+              cell.value = nr.values[c] !== undefined ? nr.values[c] : null;
+              cell.font = { bold: nr.bold, color: { argb: 'FF' + nr.fontColor }, size: 12 };
+            }
           }
         }
-      );
-
-      const claudeText = claudeResponse.data.content[0].text;
-      let summaryRow;
-      try {
-        const clean = claudeText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        summaryRow = JSON.parse(clean.substring(clean.indexOf('{'), clean.lastIndexOf('}') + 1));
-      } catch(e) {
-        summaryRow = { [cleanHeaders[0]]: 'ИТОГО' };
       }
-      resultSheet.addRow(cleanHeaders.map(h => summaryRow[h] ?? null));
+      // Пишем оригинальную строку
+      const origRow = originalRows[i];
+      const row = worksheet.getRow(writeIndex++);
+      for (let c = 0; c < origRow.cells.length; c++) {
+        const srcCell = origRow.cells[c];
+        const dstCell = row.getCell(c + 1);
+        dstCell.value = srcCell.value;
+        if (srcCell.font) dstCell.font = srcCell.font;
+        if (srcCell.fill) dstCell.fill = srcCell.fill;
+        if (srcCell.border) dstCell.border = srcCell.border;
+        if (srcCell.alignment) dstCell.alignment = srcCell.alignment;
+        if (srcCell.numFmt) dstCell.numFmt = srcCell.numFmt;
+      }
+    }
+
+    // Если вставка в конец
+    if (insertAfterIndex >= originalRows.length) {
+      for (const nr of newRows) {
+        const row = worksheet.getRow(writeIndex++);
+        if (!nr.isEmpty) {
+          for (let c = 0; c < Math.min(nr.values.length, maxCol); c++) {
+            const cell = row.getCell(c + 1);
+            cell.value = nr.values[c] !== undefined ? nr.values[c] : null;
+            cell.font = { bold: nr.bold, color: { argb: 'FF' + nr.fontColor }, size: 12 };
+          }
+        }
+      }
     }
 
     // Авторазмер первых 3 колонок
     [1, 2, 3].forEach(colNum => {
       let maxLen = 10;
-      resultSheet.getColumn(colNum).eachCell({ includeEmpty: false }, cell => {
+      worksheet.getColumn(colNum).eachCell({ includeEmpty: false }, cell => {
         const len = String(cell.value || '').length;
         if (len > maxLen) maxLen = len;
       });
-      resultSheet.getColumn(colNum).width = Math.min(maxLen + 2, 50);
+      worksheet.getColumn(colNum).width = Math.min(maxLen + 2, 50);
     });
 
-    // Сохраняем
     const outputPath = path.join('uploads', `result_${Date.now()}.xlsx`);
-    await resultWorkbook.xlsx.writeFile(outputPath);
+    await workbook.xlsx.writeFile(outputPath);
 
     const resultName = 'result_' + originalFilename;
     res.download(outputPath, resultName, () => {
